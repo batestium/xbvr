@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"math"
 	"net/http"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -717,7 +718,61 @@ func (i SceneResource) searchSceneIndex(req *restful.Request, resp *restful.Resp
 		}
 	}
 
+	// Codes are identifiers, not prose: retrieve exact matches independently of
+	// the full-text result limit and rank them above duration-boosted candidates.
+	if req.QueryParameter("fileId") != "" {
+		if code := sceneCodeQuery(q); code != "" {
+			var exact []models.Scene
+			if err := db.Where("UPPER(TRIM(title)) = ? OR UPPER(TRIM(scene_id)) = ?", code, code).
+				Preload("Tags").Preload("Cast").Preload("Files").Preload("History").Preload("Cuepoints").
+				Order("id ASC").Find(&exact).Error; err != nil {
+				log.Error(err)
+			} else {
+				scenes = prioritizeExactScenes(scenes, exact)
+			}
+		}
+	}
 	resp.WriteHeaderAndEntity(http.StatusOK, ResponseGetScenes{Results: len(scenes), Scenes: scenes})
+}
+
+// Only recognize a complete code query; field filters and ordinary prose must
+// retain their existing semantics. Keep leading zeroes significant.
+var sceneCodePattern = regexp.MustCompile(`(?i)^([a-z]{4})[-_ ]+([0-9]+)$`)
+
+func sceneCodeQuery(q string) string {
+	parts := sceneCodePattern.FindStringSubmatch(strings.TrimSpace(q))
+	if parts == nil {
+		return ""
+	}
+	return strings.ToUpper(parts[1]) + "-" + parts[2]
+}
+
+func prioritizeExactScenes(scenes, exact []models.Scene) []models.Scene {
+	if len(exact) == 0 {
+		return scenes
+	}
+	maxScore := 0.0
+	for _, scene := range scenes {
+		if scene.Score > maxScore {
+			maxScore = scene.Score
+		}
+	}
+	seen := make(map[uint]bool)
+	result := make([]models.Scene, 0, len(scenes)+len(exact))
+	for _, scene := range exact {
+		if !seen[scene.ID] {
+			scene.Score = maxScore + 1
+			result = append(result, scene)
+			seen[scene.ID] = true
+		}
+	}
+	for _, scene := range scenes {
+		if !seen[scene.ID] {
+			result = append(result, scene)
+			seen[scene.ID] = true
+		}
+	}
+	return result
 }
 
 // Duration-match tuning for file→scene matching. Scene.Duration is stored in whole

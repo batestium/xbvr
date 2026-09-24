@@ -7,7 +7,10 @@ import (
 	"time"
 
 	"github.com/blevesearch/bleve/v2"
+	"github.com/blevesearch/bleve/v2/analysis/analyzer/custom"
 	"github.com/blevesearch/bleve/v2/analysis/analyzer/simple"
+	"github.com/blevesearch/bleve/v2/analysis/token/lowercase"
+	"github.com/blevesearch/bleve/v2/analysis/tokenizer/regexp"
 	"github.com/blevesearch/bleve/v2/index/scorch"
 	"github.com/sirupsen/logrus"
 	"github.com/xbapps/xbvr/pkg/common"
@@ -35,10 +38,9 @@ func NewIndex(name string) (*Index, error) {
 
 	path := filepath.Join(common.IndexDirV2, name)
 
-	// the simple analyzer is more approriate for the title and cast
-	// note this does not effect search unless the query includes cast: or title:
+	// Titles must retain numbers (e.g. ABCD-494); actor names keep the simple analyzer.
 	titleFieldMapping := bleve.NewTextFieldMapping()
-	titleFieldMapping.Analyzer = simple.Name
+	titleFieldMapping.Analyzer = "title_with_numbers"
 	castFieldMapping := bleve.NewTextFieldMapping()
 	castFieldMapping.Analyzer = simple.Name
 	releaseFieldMapping := bleve.NewDateTimeFieldMapping()
@@ -52,6 +54,21 @@ func NewIndex(name string) (*Index, error) {
 	sceneMapping.AddFieldMappingsAt("duration", durationFieldMapping)
 
 	mapping := bleve.NewIndexMapping()
+	// Keep the simple analyzer's punctuation boundaries and case folding, but
+	// retain numbers. In particular, apostrophes must still split into words.
+	if err := mapping.AddCustomTokenizer("title_letters_numbers", map[string]interface{}{
+		"type":   regexp.Name,
+		"regexp": `[\p{L}\p{N}]+`,
+	}); err != nil {
+		return nil, err
+	}
+	if err := mapping.AddCustomAnalyzer("title_with_numbers", map[string]interface{}{
+		"type":          custom.Name,
+		"tokenizer":     "title_letters_numbers",
+		"token_filters": []string{lowercase.Name},
+	}); err != nil {
+		return nil, err
+	}
 	mapping.AddDocumentMapping("_default", sceneMapping)
 
 	idx, err := bleve.NewUsing(path, mapping, scorch.Name, scorch.Name, nil)
